@@ -73,8 +73,10 @@ async function dashboardPayload(user: Awaited<ReturnType<typeof currentUser>>) {
     .innerJoin(itensPrescricao, eq(itensPrescricao.prescricaoId, prescricoes.id)).innerJoin(produtos, eq(itensPrescricao.produtoId, produtos.id)).orderBy(desc(prescricoes.criadoEm)) : [];
   const applicationRows = user.papel === "medico_admin" ? await db.select({
     id: aplicacoes.id, prescricaoId: aplicacoes.prescricaoId, pacienteId: aplicacoes.pacienteId, pacienteNome: pacientes.nome,
-    produtoNome: produtos.nome, loteNumero: lotes.numero, quantidade: itensAplicacao.quantidade, localAplicacao: aplicacoes.localAplicacao,
-    observacoes: aplicacoes.observacoes, reacao: aplicacoes.reacao, aplicadoEm: aplicacoes.aplicadoEm, estornadaEm: aplicacoes.estornadaEm,
+    localAplicacao: aplicacoes.localAplicacao, observacoes: aplicacoes.observacoes, reacao: aplicacoes.reacao,
+    aplicadoEm: aplicacoes.aplicadoEm, estornadaEm: aplicacoes.estornadaEm,
+    itemAplicacaoId: itensAplicacao.id, itemPrescricaoId: itensAplicacao.itemPrescricaoId, produtoId: produtos.id,
+    produtoNome: produtos.nome, loteId: lotes.id, loteNumero: lotes.numero, quantidade: itensAplicacao.quantidade,
   }).from(aplicacoes).innerJoin(pacientes, eq(aplicacoes.pacienteId, pacientes.id)).innerJoin(itensAplicacao, eq(itensAplicacao.aplicacaoId, aplicacoes.id))
     .innerJoin(itensPrescricao, eq(itensAplicacao.itemPrescricaoId, itensPrescricao.id)).innerJoin(produtos, eq(itensPrescricao.produtoId, produtos.id))
     .innerJoin(lotes, eq(itensAplicacao.loteId, lotes.id)).orderBy(desc(aplicacoes.aplicadoEm)) : [];
@@ -93,8 +95,31 @@ async function dashboardPayload(user: Awaited<ReturnType<typeof currentUser>>) {
     entidadeId: auditoria.entidadeId, detalhes: auditoria.detalhes, criadoEm: auditoria.criadoEm,
   }).from(auditoria).leftJoin(usuarios, eq(auditoria.usuarioId, usuarios.id)).orderBy(desc(auditoria.criadoEm)).limit(80) : [];
   const userRows = user.papel === "medico_admin" ? await db.select({ id: usuarios.id, nome: usuarios.nome, email: usuarios.email, papel: usuarios.papel, ativo: usuarios.ativo }).from(usuarios).orderBy(asc(usuarios.nome)) : [];
+  const prescriptionsPayload = Array.from(prescriptionRows.reduce((groups, row) => {
+    let prescription = groups.get(row.id);
+    if (!prescription) {
+      prescription = { id: row.id, pacienteId: row.pacienteId, pacienteNome: row.pacienteNome, medicoNome: row.medicoNome,
+        estado: row.estado, observacoes: row.observacoes, criadoEm: row.criadoEm, finalizadoEm: row.finalizadoEm, items: [] as Array<Record<string, unknown>> };
+      groups.set(row.id, prescription);
+    }
+    prescription.items.push({ id: row.itemId, produtoId: row.produtoId, produtoNome: row.produtoNome, apresentacao: row.apresentacao,
+      concentracao: row.concentracao, dose: row.dose, via: row.via, quantidade: row.quantidade, instrucoes: row.instrucoes, recorrenciaDias: row.recorrenciaDias });
+    return groups;
+  }, new Map<number, Record<string, unknown> & { items: Array<Record<string, unknown>> }>()).values());
+  const applicationsPayload = Array.from(applicationRows.reduce((groups, row) => {
+    let application = groups.get(row.id);
+    if (!application) {
+      application = { id: row.id, prescricaoId: row.prescricaoId, pacienteId: row.pacienteId, pacienteNome: row.pacienteNome,
+        localAplicacao: row.localAplicacao, observacoes: row.observacoes, reacao: row.reacao, aplicadoEm: row.aplicadoEm,
+        estornadaEm: row.estornadaEm, items: [] as Array<Record<string, unknown>> };
+      groups.set(row.id, application);
+    }
+    application.items.push({ id: row.itemAplicacaoId, itemPrescricaoId: row.itemPrescricaoId, produtoId: row.produtoId,
+      produtoNome: row.produtoNome, loteId: row.loteId, loteNumero: row.loteNumero, quantidade: row.quantidade });
+    return groups;
+  }, new Map<number, Record<string, unknown> & { items: Array<Record<string, unknown>> }>()).values());
   return { user: { id: user.id, nome: user.nome, email: user.email, papel: user.papel }, patients: patientRows, products: productRows, lots: lotRows,
-    reminders: reminderRows, prescriptions: prescriptionRows, applications: applicationRows, symptoms: symptomRows, assessments: assessmentRows,
+    reminders: reminderRows, prescriptions: prescriptionsPayload, applications: applicationsPayload, symptoms: symptomRows, assessments: assessmentRows,
     charts: chartRows, evolutions: evolutionRows, audit: auditRows, users: userRows, settings: { expiryAlertDays: 60, timezone: "America/Fortaleza" } };
 }
 
@@ -170,35 +195,58 @@ export async function POST(request: Request) {
 
     if (action === "create_prescription") {
       requireDoctor(user.papel as Papel);
-      const pacienteId = number(body.pacienteId), produtoId = number(body.produtoId), quantidade = number(body.quantidade);
-      if (!pacienteId || !produtoId || !(quantidade > 0) || !text(body.dose) || !text(body.via)) return Response.json({ error: "Preencha paciente, produto, dose, via e quantidade." }, { status: 400 });
-      const [product] = await db.select().from(produtos).where(eq(produtos.id, produtoId)).limit(1);
+      const pacienteId = number(body.pacienteId);
+      const rawItems = Array.isArray(body.itens) ? body.itens as Array<Record<string, unknown>> : [];
+      const items = rawItems.map((item) => ({ produtoId: number(item.produtoId), dose: text(item.dose, 100), via: text(item.via, 30),
+        quantidade: number(item.quantidade), instrucoes: text(item.instrucoes), recorrenciaDias: number(item.recorrenciaDias) > 0 ? number(item.recorrenciaDias) : null }));
+      if (!pacienteId || !items.length || items.some((item) => !item.produtoId || !(item.quantidade > 0) || !item.dose || !item.via)) return Response.json({ error: "Preencha paciente, dose, via e quantidade de cada injetável." }, { status: 400 });
+      if (new Set(items.map((item) => item.produtoId)).size !== items.length) return Response.json({ error: "Cada injetável pode constar apenas uma vez na prescrição." }, { status: 400 });
+      const selectedProducts = await db.select().from(produtos).where(inArray(produtos.id, items.map((item) => item.produtoId)));
+      if (selectedProducts.length !== items.length || selectedProducts.some((product) => !product.ativo)) return Response.json({ error: "Um dos injetáveis selecionados não está disponível." }, { status: 400 });
+      const productById = new Map(selectedProducts.map((product) => [product.id, product]));
       const [rx] = await db.insert(prescricoes).values({ pacienteId, medicoId: user.id, estado: "finalizada", observacoes: text(body.observacoes), criadoEm: createdAt, finalizadoEm: createdAt }).returning();
-      await db.insert(itensPrescricao).values({ prescricaoId: rx.id, produtoId, concentracao: product?.apresentacao ?? text(body.concentracao), dose: text(body.dose, 100), via: text(body.via, 30), quantidade, instrucoes: text(body.instrucoes), recorrenciaDias: number(body.recorrenciaDias) > 0 ? number(body.recorrenciaDias) : null });
-      await audit(user.id, "finalizou", "prescricao", String(rx.id));
+      await db.insert(itensPrescricao).values(items.map((item) => ({ prescricaoId: rx.id, produtoId: item.produtoId,
+        concentracao: productById.get(item.produtoId)?.apresentacao ?? "", dose: item.dose, via: item.via, quantidade: item.quantidade,
+        instrucoes: item.instrucoes, recorrenciaDias: item.recorrenciaDias })));
+      await audit(user.id, "finalizou", "prescricao", String(rx.id), `itens:${items.length}`);
       return Response.json({ ok: true, prescriptionId: rx.id }, { status: 201 });
     }
 
     if (action === "apply_prescription") {
       requireDoctor(user.papel as Papel);
-      const prescricaoId = number(body.prescricaoId), loteId = number(body.loteId);
+      const prescricaoId = number(body.prescricaoId);
+      const selected = (Array.isArray(body.itens) ? body.itens : []).map((item) => item as Record<string, unknown>).map((item) => ({ itemPrescricaoId: number(item.itemPrescricaoId), loteId: number(item.loteId) }));
       const [rx] = await db.select().from(prescricoes).where(eq(prescricoes.id, prescricaoId)).limit(1);
-      const [item] = await db.select().from(itensPrescricao).where(eq(itensPrescricao.prescricaoId, prescricaoId)).limit(1);
-      const [lot] = await db.select().from(lotes).where(eq(lotes.id, loteId)).limit(1);
-      if (!rx || !item || !lot || !["finalizada", "parcialmente_aplicada"].includes(rx.estado)) return Response.json({ error: "Prescrição ou lote inválido." }, { status: 400 });
-      if (lot.produtoId !== item.produtoId || lot.saldo < item.quantidade) return Response.json({ error: "O lote não possui saldo suficiente para esta aplicação." }, { status: 409 });
-      if (lot.validade < createdAt.slice(0, 10)) return Response.json({ error: "Não é permitido utilizar lote vencido." }, { status: 409 });
+      if (!rx || !["finalizada", "parcialmente_aplicada"].includes(rx.estado) || !selected.length) return Response.json({ error: "Prescrição ou itens de aplicação inválidos." }, { status: 400 });
+      if (new Set(selected.map((item) => item.itemPrescricaoId)).size !== selected.length || selected.some((item) => !item.itemPrescricaoId || !item.loteId)) return Response.json({ error: "Selecione um lote para cada injetável que será aplicado." }, { status: 400 });
+      const prescriptionItems = await db.select().from(itensPrescricao).where(eq(itensPrescricao.prescricaoId, prescricaoId));
+      const appliedRows = await db.select({ itemPrescricaoId: itensAplicacao.itemPrescricaoId }).from(itensAplicacao).innerJoin(aplicacoes, eq(itensAplicacao.aplicacaoId, aplicacoes.id)).where(eq(aplicacoes.prescricaoId, prescricaoId));
+      const appliedItemIds = new Set(appliedRows.map((row) => row.itemPrescricaoId));
+      const itemById = new Map(prescriptionItems.filter((item) => !appliedItemIds.has(item.id)).map((item) => [item.id, item]));
+      const lotsById = new Map((await db.select().from(lotes).where(inArray(lotes.id, selected.map((item) => item.loteId)))).map((lot) => [lot.id, lot]));
+      const selectedRows = selected.map((selection) => ({ selection, item: itemById.get(selection.itemPrescricaoId), lot: lotsById.get(selection.loteId) }));
+      if (selectedRows.some(({ item, lot }) => !item || !lot || lot.produtoId !== item.produtoId || lot.saldo < item.quantidade || lot.validade < createdAt.slice(0, 10))) return Response.json({ error: "Revise os lotes: há produto divergente, validade vencida ou saldo insuficiente." }, { status: 409 });
+      const nextState = selectedRows.length === itemById.size ? "aplicada" : "parcialmente_aplicada";
+      const recurring = selectedRows.filter(({ item }) => item!.recorrenciaDias);
       const [application] = await db.insert(aplicacoes).values({ prescricaoId, pacienteId: rx.pacienteId, profissionalId: user.id, localAplicacao: text(body.localAplicacao, 100), observacoes: text(body.observacoes), reacao: text(body.reacao), aplicadoEm: createdAt }).returning();
-      await db.batch([
-        db.insert(itensAplicacao).values({ aplicacaoId: application.id, itemPrescricaoId: item.id, loteId, quantidade: item.quantidade }),
-        db.update(lotes).set({ saldo: lot.saldo - item.quantidade }).where(eq(lotes.id, loteId)),
-        db.insert(movimentacoes).values({ produtoId: item.produtoId, loteId, tipo: "saida_aplicacao", quantidade: -item.quantidade, motivo: `Aplicação da prescrição ${prescricaoId}`, aplicacaoId: application.id, usuarioId: user.id, criadoEm: createdAt }),
-        db.update(prescricoes).set({ estado: "aplicada" }).where(eq(prescricoes.id, prescricaoId)),
-        db.insert(auditoria).values({ usuarioId: user.id, acao: "confirmou", entidade: "aplicacao", entidadeId: String(application.id), detalhes: `prescricao:${prescricaoId};lote:${loteId}`, criadoEm: createdAt }),
-      ]);
-      if (item.recorrenciaDias) {
-        const next = new Date(createdAt); next.setUTCDate(next.getUTCDate() + item.recorrenciaDias);
-        await db.insert(lembretes).values({ pacienteId: rx.pacienteId, aplicacaoId: application.id, produtoId: item.produtoId, dataPrevista: next.toISOString().slice(0, 10), estado: "proximo", atualizadoPor: user.id, atualizadoEm: createdAt });
+      try {
+        const writes = [
+          ...selectedRows.flatMap(({ selection, item, lot }) => [
+            db.insert(itensAplicacao).values({ aplicacaoId: application.id, itemPrescricaoId: item!.id, loteId: selection.loteId, quantidade: item!.quantidade }),
+            db.update(lotes).set({ saldo: lot!.saldo - item!.quantidade }).where(eq(lotes.id, selection.loteId)),
+            db.insert(movimentacoes).values({ produtoId: item!.produtoId, loteId: selection.loteId, tipo: "saida_aplicacao", quantidade: -item!.quantidade, motivo: `Aplicação da prescrição ${prescricaoId}`, aplicacaoId: application.id, usuarioId: user.id, criadoEm: createdAt }),
+          ]),
+          ...(recurring.length ? [db.insert(lembretes).values(recurring.map(({ item }) => {
+            const next = new Date(createdAt); next.setUTCDate(next.getUTCDate() + item!.recorrenciaDias!);
+            return { pacienteId: rx.pacienteId, aplicacaoId: application.id, produtoId: item!.produtoId, dataPrevista: next.toISOString().slice(0, 10), estado: "proximo" as const, atualizadoPor: user.id, atualizadoEm: createdAt };
+          }))] : []),
+          db.update(prescricoes).set({ estado: nextState }).where(eq(prescricoes.id, prescricaoId)),
+          db.insert(auditoria).values({ usuarioId: user.id, acao: "confirmou", entidade: "aplicacao", entidadeId: String(application.id), detalhes: `prescricao:${prescricaoId};itens:${selectedRows.length}`, criadoEm: createdAt }),
+        ];
+        await db.batch(writes as [typeof writes[number], ...typeof writes[number][]]);
+      } catch (error) {
+        await db.delete(aplicacoes).where(eq(aplicacoes.id, application.id));
+        throw error;
       }
       return Response.json({ ok: true, applicationId: application.id });
     }
