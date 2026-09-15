@@ -3,6 +3,7 @@ import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-or
 export const usuarios = sqliteTable("usuarios", {
   id: integer("id").primaryKey({ autoIncrement: true }), externalId: text("external_id").notNull(), email: text("email").notNull(),
   nome: text("nome").notNull(), papel: text("papel", { enum: ["medico_admin", "recepcao"] }).notNull(),
+  crm: text("crm"), crmUf: text("crm_uf"),
   ativo: integer("ativo", { mode: "boolean" }).notNull().default(true), criadoEm: text("criado_em").notNull(),
 }, (t) => [uniqueIndex("idx_usuarios_external_id").on(t.externalId), uniqueIndex("idx_usuarios_email").on(t.email)]);
 
