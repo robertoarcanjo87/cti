@@ -2,9 +2,16 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const targetUrl = "https://cti-injetaveis-clinica.dr-robertoarcanjo.chatgpt.site/";
-const outputDir = join(process.cwd(), ".vercel", "output", "static");
+const vercelOutputDir = join(process.cwd(), ".vercel", "output");
+const outputDir = join(vercelOutputDir, "static");
 
 mkdirSync(outputDir, { recursive: true });
+
+writeFileSync(
+  join(vercelOutputDir, "config.json"),
+  `${JSON.stringify({ version: 3 }, null, 2)}\n`,
+  "utf8",
+);
 
 writeFileSync(
   join(outputDir, "index.html"),
